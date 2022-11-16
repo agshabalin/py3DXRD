@@ -14,24 +14,26 @@ from datetime import datetime
 from angles_and_ranges import mod_360
 from angles_and_ranges import merge_overlaps
 from angles_and_ranges import group_to_chains
-from ImageD11 import indexing # this require running "module load maxwell ImageD11" before starting python
-from ImageD11 import transformer # this require running "module load maxwell ImageD11" before starting python
+from ImageD11 import indexing # might require running "module load maxwell ImageD11" before starting python
+from ImageD11 import transformer # might require running "module load maxwell ImageD11" before starting python
+from Geometry import Geometry
+
 single_separator = "--------------------------------------------------------------\n"
 double_separator = "==============================================================\n"
 
-class GveFile:
+class GvectorEvaluator:
     
     def __init__(self, directory = None):
-        self.log = []
-        self.absorbed = []
         self.directory = None
-        self.gve_file = None
+        self.name = None
         self.ds_eta_omega_file = None
-        self.unitcell = []
-        self.symmetry = None
+        self.geometries = []
         self.header = []
         self.dshkls = []
         self.gvectors = []
+        self.log = []
+        self.absorbed = []
+        self.spot3d_id_reg = 10*100000
         
         self.ds_ranges = []
         self.tth_ranges = []
@@ -50,7 +52,7 @@ class GveFile:
         self.omega_bins = np.zeros((1))
         self.eta_bins = np.zeros((1))
         self.ds_eta_omega = np.zeros((1,1,1))
-        self.add_to_log('Created GveFile object.', True)
+        self.add_to_log('Initialized GvectorEvaluator object.', True)
         if directory: self.set_attr('directory', directory)
         return
 
@@ -71,31 +73,33 @@ class GveFile:
             old, new = f'array of {old.shape}', f'array of {new.shape}'
         self.add_to_log(attr+': '+str(old)+' -> '+str(new))
         return
-        
-        
+
+    
     def add_to_attr(self, attr, value):
         old_list = getattr(self, attr)
-        setattr(self, attr, old_list+[value])
-        new_list = getattr(self, attr)
-        self.add_to_log(attr+': += '+str(new_list[-1]))
-        return
+        if type(old_list) == list: 
+            setattr(self, attr, old_list+[value])
+            new_list = getattr(self, attr)
+            self.add_to_log(attr+': += '+str(new_list[-1]))
+        else:
+            raise AttributeError('This attribute is not a list!')
+        return    
     
     
     def print(self, also_log = False):
-        print(double_separator+'GveFile object:')
-        print('absorbed:', len(self.absorbed))
+        print(double_separator+'GvectorEvaluator object:')
+        print('absorbed:' , len(self.absorbed))
+        print('spot3d_id_reg:', self.spot3d_id_reg)
         print('directory:', self.directory)
-        print('gve_file:', self.gve_file)
+        print('name:'     , self.name)
         print('ds_eta_omega_file:', self.ds_eta_omega_file)
-        print('unitcell:', self.unitcell)
-        print('symmetry:', self.symmetry)
         [print(f'header {i:2}:', r) for i,r in enumerate(self.header)]
-        print('dshkls:', len(self.dshkls))
+        print('dshkls:'  , len(self.dshkls))
         print('gvectors:', len(self.gvectors))
         
-        [print(f'ds_range {i}:' , r) for i,r in enumerate(self.ds_ranges )]
-        [print(f'tth_range {i}:', r) for i,r in enumerate(self.tth_ranges)]
-        [print(f'eta_range {i}:', r) for i,r in enumerate(self.eta_ranges)]
+        [print(f'ds_range {i}:'   , r) for i,r in enumerate(self.ds_ranges )]
+        [print(f'tth_range {i}:'  , r) for i,r in enumerate(self.tth_ranges)]
+        [print(f'eta_range {i}:'  , r) for i,r in enumerate(self.eta_ranges)]
         [print(f'omega_range {i}:', r) for i,r in enumerate(self.omega_ranges)]
         print('tth_gap:'  , self.tth_gap)
         print('ds_gap:'   , self.ds_gap)
@@ -109,6 +113,10 @@ class GveFile:
         print('eta_bins:', self.eta_bins.shape, 'array')
         print('omega_bins:', self.omega_bins.shape, 'array')
         print('ds_eta_omega:', self.ds_eta_omega.shape, 'array')
+        print('geometries:'  , len(self.geometries))
+        print('unitcell:' , self.geometries[0].unitcell )
+        print('symmetry:' , self.geometries[0].symmetry )
+        print('spacegroup:', self.geometries[0].spacegroup )
         if also_log:
             print(single_separator + 'Log:')
             for record in self.log: print(record)
@@ -117,12 +125,12 @@ class GveFile:
 
     def load_gve(self, directory = None, gve_file = None):
         if directory: self.set_attr('directory', directory)
-        if gve_file: self.set_attr('gve_file', gve_file)
-        self.add_to_log(f'Reading file: {self.directory+self.gve_file}', True)
-        if not os.path.isfile(self.directory+self.gve_file): raise FileNotFoundError
+        if gve_file: self.set_attr('name', gve_file.split('.')[0])
+        self.add_to_log('Reading file: '+self.directory+self.name+'.gve', True)
+        if not os.path.isfile(self.directory+self.name+'.gve'): raise FileNotFoundError
         header, dshkls, gvectors = [], [], []
         
-        with open(self.directory+self.gve_file, "r") as f:
+        with open(self.directory+self.name+'.gve', "r") as f:
             for line in f:
                 if line[0] == '#':
                     if 'ds h k l' in line: dshkl_keys = line[2:-1].split()
@@ -133,8 +141,16 @@ class GveFile:
                 else:
                     words = line.split()
                     if len(words) == 7 and words[-1] in ['P','I','F', 'A', 'B', 'C','R']:
-                        self.set_attr('symmetry', words[-1])
-                        self.set_attr('unitcell', [float(v) for v in words[:6]])
+                        s = self.geometries[-1].symmetry
+                        if s and s != words[-1]:
+                            raise ValueError('Symmetry in .gve file and in .par do not match!')
+                        else:
+                            self.geometries[-1].set_attr('symmetry', words[-1])
+                        u = self.geometries[-1].unitcell
+                        if u and u != [float(v) for v in words[:6]]:
+                            raise ValueError('Unit cells in .gve file and in .par do not match!')
+                        else:
+                            self.geometries[-1].set_attr('unitcell', [float(v) for v in words[:6]])
                     elif len(words) == 4:
                         d = [float(words[0])] + [int(v) for v in words[1:]]
                         dshkls.append( dict(zip(dshkl_keys,d)) )
@@ -153,14 +169,14 @@ class GveFile:
     
     def save_gve(self, directory = None, gve_file = None, overwrite = False):
         if directory: self.set_attr('directory', directory)
-        if gve_file: self.set_attr('gve_file', gve_file)
+        if gve_file: self.set_attr('name', gve_file.split('.')[0])
         if not os.path.exists(self.directory):
             os.makedirs(self.directory)
             self.add_to_log('Created directory: '+self.directory, True)
         
-        self.add_to_log(f'Writing file: {self.directory+self.gve_file}', True)
+        self.add_to_log('Writing file: '+self.directory+self.name+'.gve', True)
         # Check if file exists, if yes then ask for the permission to overwrite
-        while os.path.isfile(self.directory+self.gve_file):
+        while os.path.isfile(self.directory+self.name+'.gve'):
             self.add_to_log('File already exist!', True)
             if overwrite:
                 self.add_to_log('Overwriting...', True)
@@ -174,11 +190,11 @@ class GveFile:
                     self.add_to_log('Aborted!', True)
                     return
                 else:
-                    self.set_attr('gve_file', x)
+                    self.set_attr('name', x.split('.')[0])
         
-        f = open(self.directory+self.gve_file ,"w") 
-        s =[f'{v:.6f}' for v in self.unitcell]
-        f.write(' '.join(s+[self.symmetry]) + '\n' )
+        f = open(self.directory+self.name+'.gve' ,"w") 
+        s =[f'{v:.6f}' for v in self.geometries[0].unitcell]
+        f.write(' '.join(s+[self.geometries[0].symmetry]) + '\n' )
         for line in self.header: f.write(line + '\n')
         f.write('# ' + ' '.join(self.dshkls[0].keys()) + '\n' )
         for d in self.dshkls:
@@ -218,36 +234,44 @@ class GveFile:
  
     def remove_not_ranges(self, ds_ranges, tth_ranges, omega_ranges, eta_ranges):
         in_ranges = []
-        for i,g in enumerate(self.gvectors):
+        for i,g in enumerate(self.gvectors):          
             fit = True
             for rng in ds_ranges:
                 if g['ds'] < rng[0] or g['ds'] > rng[1]:
                     fit = False
+                else:
+                    fit = True
                     break
             if not fit: continue
-            
+
             for rng in tth_ranges:
                 if g['tth'] < rng[0] or g['tth'] > rng[1]:
                     fit = False
+                else:
+                    fit = True
                     break
             if not fit: continue
-            
+
             for rng in omega_ranges:
                 if g['omega'] < rng[0] or g['omega'] > rng[1]:
                     fit = False
+                else:
+                    fit = True
                     break
             if not fit: continue
-            
+
             for rng in eta_ranges:
                 if g['eta'] < rng[0] or g['eta'] > rng[1]:
                     fit = False
+                else:
+                    fit = True
                     break
             if not fit: continue
             else: in_ranges.append(i)
-    
+            
         self.add_to_log(f'Removing {len(self.gvectors)-len(in_ranges)} gvectors that are out of ranges', True)
         self.set_attr('gvectors', [self.gvectors[i] for i in in_ranges])
-        self.save_gve(gve_file = self.gve_file, overwrite = True)
+        self.save_gve(overwrite = True)
         return
     
     def group_gvectors(self, ds_tol, eta_tol, omega_tol):
@@ -316,10 +340,10 @@ class GveFile:
 
     def remove_not_inrings(self):
         I = indexing.indexer()
-        gve_file = self.gve_file
+        name = self.name
         self.save_gve(gve_file = 'temp.gve', overwrite = True)
-        I.readgvfile(self.directory+self.gve_file)
-        self.set_attr('gve_file', gve_file)
+        I.readgvfile(self.directory+'temp.gve')
+        self.set_attr('name', name)
         subprocess.call('rm '+self.directory+'temp.gve', shell=True)
         
         I.assigntorings()
@@ -327,7 +351,7 @@ class GveFile:
         in_rings = np.compress(np.greater(I.ra,-1),np.arange(I.gv.shape[0])) # list of indexed peaks
         self.add_to_log(f'Removing {len(self.gvectors)-len(in_rings)} gvectors that are not in rings', True)
         self.set_attr('gvectors', [self.gvectors[i] for i in in_rings])
-        self.save_gve(gve_file = self.gve_file, overwrite = True)
+        self.save_gve(overwrite = True)
         return
     
     
@@ -336,10 +360,10 @@ class GveFile:
         self.add_to_log('Calculating hkl_omega and ds_eta_omega histograms...')
         self.add_to_log(f'omega_pixsize  = {omega_pixsize}, eta_pixsize = {eta_pixsize}')
         I = indexing.indexer()
-        gve_file = self.gve_file
+        name = self.name
         self.save_gve(gve_file = 'temp.gve', overwrite = True)
-        I.readgvfile(self.directory+self.gve_file)
-        self.set_attr('gve_file', gve_file)
+        I.readgvfile(self.directory+'temp.gve')
+        self.set_attr('name', name)
         subprocess.call('rm '+self.directory+'temp.gve', shell=True)
         
         I.assigntorings()
@@ -368,7 +392,7 @@ class GveFile:
         
         if save_arrays:
             N1, N2, N3 = ds_eta_omega.shape
-            self.set_attr('ds_eta_omega_file', self.gve_file.replace('.gve', f'_omega_eta_hkl_{N3}x{N2}x{N1}.raw'))
+            self.set_attr('ds_eta_omega_file', self.name+f'_omega_eta_hkl_{N3}x{N2}x{N1}.raw')
             output_file = open(self.directory+self.ds_eta_omega_file, 'wb')
             np.float32(ds_eta_omega).tofile(output_file)
             output_file.close()
@@ -399,8 +423,8 @@ class GveFile:
             plt.xlabel('ds')
             plt.ylabel('eta (deg)')
             plt.show()
-            fig.savefig(self.directory+self.gve_file.replace('.gve', '_scatter.png'))
-            self.add_to_log('Saved projections: '+self.gve_file.replace('.gve', '_scatter.png'), True)
+            fig.savefig(self.directory+self.name+'_scatter.png')
+            self.add_to_log('Saved projections: '+self.name+'_scatter.png', True)
         
         n_peaks = self.ds_eta_omega.sum(2).sum(1) 
         for i,ds in enumerate(self.ds_bins): print(f'ds, n_peaks:  {ds:.3f}, {n_peaks[i]:d}')
@@ -434,21 +458,24 @@ class GveFile:
             plt.ylabel('omega (deg)')
             plt.xlim([-0.01, r*0.01+0.01])
             plt.show()
-            fig.savefig(self.directory+self.gve_file.replace('.gve', '_scatter_delta_ds.png'))
-            self.add_to_log('Saved eta_delta_ds: '+self.gve_file.replace('.gve', '_scatter_eta_delta_ds.png'), True)
+            fig.savefig(self.directory+self.name+'_scatter_delta_ds.png')
+            self.add_to_log('Saved eta_delta_ds: '+self.name+'_scatter_eta_delta_ds.png', True)
 
         return
 
     
-    def absorb(self, x, add_to_id = 100000):
-        if min([g['spot3d_id'] for g in x.gvectors])+add_to_id < max([g['spot3d_id'] for g in self.gvectors])+1:
-            raise ValueError(f'ind_to_add={add_to_id} is too low for assigning unique spot3d_ids!')
+    def absorb(self, x, spot3d_id_reg = None):
+        if type(spot3d_id_reg) == type(1): self.set_attr('spot3d_id_reg', spot3d_id_reg)
+        if self.spot3d_id_reg < 1: raise ValueError(f'spot3d_id_reg must be > 0 (recommended 10*100*1000). Provided: {self.spot3d_id_reg}')
+        if min([g['spot3d_id'] for g in x.gvectors])+self.spot3d_id_reg*(1+len(self.absorbed)) < max([g['spot3d_id'] for g in self.gvectors])+1:
+            raise ValueError(f'spot3d_id_reg = {self.spot3d_id_reg} is too low for assigning unique spot3d_ids!')
             
-        self.add_to_log('Absorbing GveFile object...')
-        if self.symmetry != x.symmetry: raise ValueError('Symmetries are different!')
-        if self.unitcell != x.unitcell: raise ValueError('Unit cells are different!')
-#         self.header.insert(0, '# Primary gve_file: ' + self.directory + self.gve_file)
-#         self.header.append('# Absorbed gve_file: ' + x.directory + x.gve_file)
+        self.add_to_log(f'Absorbing GvectorEvaluator object... shifting its spot3d_ids by {self.spot3d_id_reg*(1+len(self.absorbed))}.')
+        if self.geometries[0].symmetry != x.geometries[0].symmetry: raise ValueError('Symmetries are different!')
+        if self.geometries[0].unitcell != x.geometries[0].unitcell: raise ValueError('Unit cells are different!')
+#         self.header.insert(0, '#  Primary GvectorEvaluator object: ' + self.directory + self.name)
+#         self.header.append('# Absorbed GvectorEvaluator object: ' + x.directory + x.name)
+#         self.header.append(f'# Spot3d_id shift {add_to_id} computed as multiple of spot3d_id_reg = {self.spot3d_id_reg}')
 #         add_to_header = [line for line in x.header if line not in self.header]
 #         for line in add_to_header: self.add_to_attr('header', line)
         common = [k for k in self.gvectors[0].keys() if k in x.gvectors[0].keys()]
@@ -459,13 +486,21 @@ class GveFile:
         
         for g in x.gvectors:
             c = {key:value for key,value in g.items() if key in common}
-            c['spot3d_id'] += add_to_id # 1000000*(1+int(max_id/1000000))
+            c['spot3d_id'] += self.spot3d_id_reg*(1+len(self.absorbed))
             gvectors.append(c)
         ind = np.argsort([g['ds'] for g in gvectors]) # Sort in asceding ds 
         self.set_attr('gvectors', [gvectors[i] for i in ind])
         self.add_to_attr('absorbed', x)
         return    
+
     
+#     def import_metadata(self, peak_indexer):
+#         PI = peak_indexer
+#         self.add_to_log(f'Importing metadata from PeakIndexer: {PI.directory}{PI.name}', True)
+#         self.set_attr('directory', PI.directory)
+#         self.set_attr('name'     , PI.name)
+#         self.set_attr('geometry' , PI.geometry)
+#         return
 ### OLD version of group_vectors, works slower and also 
 #         def group_gvectors(self, ds_tol, eta_tol, omega_tol):
 #         print(double_separator+f'Grouping {len(self.gvectors)} g-vectors')
@@ -497,15 +532,3 @@ class GveFile:
 #         ind = np.argsort([g['ds'] for g in g_sum]) # Sort in asceding ds 
 #         self.set_attr('gvectors', [g_sum[i] for i in ind])
 #         return
-    
-    
-#### TESTS    ###############
-# from GveFile import GveFile
-# G = GveFile(directory='/asap3/petra3/gpfs/p21.2/2021/data/11008399/processed/CS_1/load1/z_00/')
-# G.load_gve(gve_file = 'V4_peaks_merged.gve')
-# #G.print()
-# G.save_gve(gve_file = 'V4_peaks_merged_test.gve', overwrite = True)
-# G.calculate_ranges(0.1, 1, 1)
-# G.group_gvectors(0.1, 1, 1)
-# G.calc_histo(0.5, 0.5)
-# G.print(True)

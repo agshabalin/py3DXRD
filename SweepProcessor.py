@@ -11,21 +11,24 @@ import sys, os, subprocess, pdb, re
 import numpy as np
 from numpy import float32
 from datetime import datetime
-import imageio, fabio
+import tifffile, fabio
 import pickle, yaml
+import scipy, polarTransform
 from skimage.transform import warp_polar
 from skimage.util import img_as_float
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from hexrd import imageseries
 from hexrd.imageseries.omega import OmegaWedges
-from ImageD11 import labelimage
-#sys.path.insert(1, '/home/shabalin/scripts/')
+from angles_and_ranges import merge_overlaps
+from Geometry import Geometry
+from PeakIndexer import PeakIndexer
 
 single_separator = "--------------------------------------------------------------\n"
 double_separator = "==============================================================\n"
 
-class SweepScan:
+
+class SweepProcessor:
     
     def __init__(self, directory=None, name=None):
         self.log = []
@@ -40,12 +43,12 @@ class SweepScan:
         self.chunk = {'frames':[], 'filenames':[], 'omegas':[]}
         self.imgs = None
         self.processing = {'options':None, 'mask':None, 'bckg_indices':None, 'bckg':None}
-        self.projs = {'imsum':None, 'immax':None,
-                      'q0_pos':[], 'etatth':None, 'omgtth':None, 'omgeta':None}
+        self.projs = {'imsum':None, 'immax':None, 'q0_pos':None,
+                      'etatth':None, 'omgtth':None, 'omgeta':None}
         self.thresholds = []
         self.pix_tol    = None
-        self.spline_file= None
-        self.add_to_log('Created SweepScan object.', True)
+        self.geometry   = Geometry()
+        self.add_to_log('Initialized SweepProcessor object.', True)
         if directory: self.set_attr('directory', directory)
         if name     : self.set_attr('name'     , name)
         return
@@ -61,20 +64,25 @@ class SweepScan:
         old = getattr(self, attr)
         setattr(self, attr, value)
         new = getattr(self, attr)
+        if attr == 'geometry' and old is not None: old = old.__dict__
+        if attr == 'geometry' and new is not None: new = new.__dict__
         self.add_to_log(attr+': '+str(old)+' -> '+str(new))
         return
-        
-        
+
+    
     def add_to_attr(self, attr, value):
         old_list = getattr(self, attr)
-        setattr(self, attr, old_list+[value])
-        new_list = getattr(self, attr)
-        self.add_to_log(attr+': += '+str(new_list[-1]))
+        if type(old_list) == list: 
+            setattr(self, attr, old_list+[value])
+            new_list = getattr(self, attr)
+            self.add_to_log(attr+': += '+str(new_list[-1]))
+        else:
+            raise AttributeError('This attribute is not a list!')
         return
     
     
     def print(self, also_log = False):
-        print(double_separator+'SweepScan object:')
+        print(double_separator+'SweepProcessor object:')
         print('directory:' , self.directory)
         print('name:'      , self.name)
         print('position:'  , self.position)
@@ -100,7 +108,9 @@ class SweepScan:
         print('projs:'      , self.projs, '\n')
         print('thresholds:' , self.thresholds, '\n')
         print('pix_tol:'    , self.pix_tol, '\n')
-        print('spline_file:', self.spline_file, '\n')
+        if self.geometry:
+            print('geometry:')
+            self.geometry.print()        
 #         print('absorbed:', len(self.absorbed))
         if also_log:
             print(single_separator + 'Log:')
@@ -159,11 +169,16 @@ class SweepScan:
             if expected_file not in matching_files:
                 raise FileNotFoundError(expected_file)
                                   
-        c['filenames'] = [matching_files[ii] for ii in c['frames']]
+        try:
+            c['filenames'] = [matching_files[ii] for ii in c['frames']]
+        except:
+            raise FileNotFoundError('Some files are missing in the raw directory! Not uploaded yet?')
+            
         c['omegas'] = np.empty([len(c['frames']),2], dtype=float)
         for ii in range(len(c['frames'])):
             start_angle = s['omega_start']+s['omega_step']*c['frames'][ii]
-            c['omegas'][ii] = [start_angle-0.5*s['omega_step'], start_angle+0.5*s['omega_step']]
+#             c['omegas'][ii] = [start_angle-0.5*s['omega_step'], start_angle+0.5*s['omega_step']]
+            c['omegas'][ii] = [start_angle, start_angle + s['omega_step']]
         
         if s['omega_step'] > 0:
             imgs_omegas = c['omegas'][::1,::1]
@@ -211,7 +226,7 @@ class SweepScan:
     
         self.set_attr('imgs', imgs)
         del imgs_omegas, imgs_frames, all_files, matching_files, config_file
-        self.add_to_log(f'{len(imgs)} images of size {imgs[0].shape} loaded.', True)
+        self.add_to_log(f'{len(imgs)} images of size {imgs[0].shape} (slow, fast) loaded.', True)
         return
     
     
@@ -245,44 +260,141 @@ class SweepScan:
         else           : imgs = ProcessedIS(self.imgs, [('dark', p['bckg'])])
         self.set_attr('processing', p)
         self.set_attr('imgs', imgs)
+        self.geometry.set_attr('dety_size', imgs[0].shape[1]) # fast dimension in numpy array
+        self.geometry.set_attr('detz_size', imgs[0].shape[0]) # slow dimension in numpy array
+        omegastep = self.chunk['omegas'][0][1] - self.chunk['omegas'][0][0]
+        self.geometry.set_attr('omegasign', int(np.sign(omegastep)))
         return
     
 
-    def calculate_projections(self, q0_pos=None):
-        if not q0_pos: q0_pos = self.projs['q0_pos']
+#     def calculate_projections(self, q0_pos=None, rad_range=None):
+#         if q0_pos:
+#             self.geometry.set_attr('y_center', q0_pos[1])
+#             self.geometry.set_attr('z_center', q0_pos[0])
+#         if type(self.geometry.y_center) not in [int, float]:
+#             raise ValueError('The y_center position is not defined properly!')
+#         if type(self.geometry.z_center) not in [int, float]:
+#             raise ValueError('The z_center position is not defined properly!')
+
+#         q0_pos = [self.geometry.z_center, self.geometry.y_center]
+#         im_size = list(self.imgs[0].shape)
+#         min_r_0 = max(0 - q0_pos[0], q0_pos[0] - im_size[0], 0)
+#         min_r_1 = max(0 - q0_pos[1], q0_pos[1] - im_size[1], 0)
+#         max_r_0 = max(q0_pos[0] - 0, im_size[0] - q0_pos[0])
+#         max_r_1 = max(q0_pos[1] - 0, im_size[1] - q0_pos[1])
+#         min_rad = round(np.sqrt(min_r_0**2+min_r_1**2))
+#         max_rad = round(np.sqrt(max_r_0**2+max_r_1**2))
+#         if rad_range:
+#             rad_range = [round(rad_range[0]), round(rad_range[1])]
+#         else:
+#             rad_range = [min_rad, max_rad]    
+#         if rad_range[0] < min_rad: rad_range[0] = min_rad
+#         if rad_range[1] > max_rad: rad_range[1] = max_rad
+        
+#         print(f'Calculating projections for im_size={im_size}, q0_pos={q0_pos}, min_rad={min_rad}, max_rad={max_rad}\n...')
+#         immax = imageseries.stats.max(self.imgs, len(self.imgs))
+#         imsum = 1*self.imgs[0]
+#         img = warp_polar(img_as_float(self.imgs[0]), center=q0_pos, radius=max_rad)[:,rad_range[0]:rad_range[1]]
+#         etatth = img
+#         omgeta = np.zeros([len(self.imgs), img.shape[0]], dtype=np.float32)
+#         omgtth = np.zeros([len(self.imgs), img.shape[1]], dtype=np.float32)
+#         omgeta[0,:] = etatth.sum(1)
+#         omgtth[0,:] = etatth.sum(0)
+
+#         for i in range(1,len(self.imgs)):
+#             imsum += 1*self.imgs[i]
+#             img = warp_polar(img_as_float(self.imgs[i]), center=q0_pos, radius=max_rad)[:,rad_range[0]:rad_range[1]]
+#             etatth += img
+#             omgeta[i,:] = img.sum(1)
+#             omgtth[i,:] = img.sum(0)
+    
+#         self.set_attr('projs', {'imsum':img_as_float(imsum), 'immax':immax, 'q0_pos':q0_pos,
+#                                 'etatth':img_as_float(etatth), 'omgtth':omgtth, 'omgeta':omgeta})
+#         suggested_thr = np.percentile(immax.flatten(), 99.9)
+#         self.add_to_log(f"99.9 percentage threshold: {round(suggested_thr)}", True)
+#         del max_rad, img, etatth, omgeta, omgtth, suggested_thr
+#         return
+
+
+    def calculate_projections(self, q0_pos=None, rad_ranges = None):
+        if not q0_pos or q0_pos == 'auto':
+            q0_pos = [self.geometry.z_center, self.geometry.y_center]
+        if type(q0_pos[1]) not in [int, float, np.float64]:
+            raise ValueError('The y_center position is not defined properly!')
+        if type(q0_pos[0]) not in [int, float, np.float64]:
+            raise ValueError('The z_center position is not defined properly!')
+
         im_size = list(self.imgs[0].shape)
         min_r_0 = max(0 - q0_pos[0], q0_pos[0] - im_size[0], 0)
         min_r_1 = max(0 - q0_pos[1], q0_pos[1] - im_size[1], 0)
         max_r_0 = max(q0_pos[0] - 0, im_size[0] - q0_pos[0])
         max_r_1 = max(q0_pos[1] - 0, im_size[1] - q0_pos[1])
-        min_rad = np.sqrt(min_r_0**2+min_r_1**2)
-        max_rad = np.sqrt(max_r_0**2+max_r_1**2)
-        
+        min_rad = round(np.sqrt(min_r_0**2+min_r_1**2))
+        max_rad = round(np.sqrt(max_r_0**2+max_r_1**2))
+
+        if type(rad_ranges) != list: rad_ranges = [[min_rad, max_rad]]
+
+        corrected_ranges = []
+        for ir, rng in enumerate(rad_ranges):
+            if rng[0] < min_rad: rng[0] = min_rad
+            if rng[1] > max_rad: rng[1] = max_rad
+            rng = [round(rng[0]), round(rng[1])]
+            if rng[1] > rng[0] and rng not in corrected_ranges:
+                corrected_ranges.append( rng )
+            else:
+                continue
+        rad_ranges = merge_overlaps(corrected_ranges, margin=0)
+
         print(f'Calculating projections for im_size={im_size}, q0_pos={q0_pos}, min_rad={min_rad}, max_rad={max_rad}\n...')
         immax = imageseries.stats.max(self.imgs, len(self.imgs))
-        imsum = self.imgs[0]
-        img = warp_polar(img_as_float(self.imgs[0]), center=q0_pos, radius=max_rad)
-        etatth = img
-        omgeta = np.zeros([len(self.imgs), img.shape[0]], dtype=np.float32)
-        omgtth = np.zeros([len(self.imgs), img.shape[1]], dtype=np.float32)
-        omgeta[0,:] = etatth.sum(1)
-        omgtth[0,:] = etatth.sum(0)
+        imsum = 1*self.imgs[0]
+        imgp = warp_polar(1.*self.imgs[0], center=q0_pos, radius=max_rad)
+        etatth = imgp
+        omgeta = np.zeros([len(self.imgs), imgp.shape[0]], dtype=np.float32)
+        omgtth = np.zeros([len(self.imgs), imgp.shape[1]], dtype=np.float32)
+        omgeta[0,:] = imgp.sum(1)
+        omgtth[0,:] = imgp.sum(0)
 
-        for i in range(1,len(self.imgs)):
-            imsum += self.imgs[i]
-            img = warp_polar(img_as_float(self.imgs[i]), center=q0_pos, radius=max_rad)
-            etatth += img
-            omgeta[i,:] = img.sum(1)
-            omgtth[i,:] = img.sum(0)
-    
-        self.set_attr('projs', {'imsum':img_as_float(imsum), 'immax':immax, 'q0_pos':q0_pos,
-                                'etatth':img_as_float(etatth), 'omgtth':omgtth, 'omgeta':omgeta})
-        suggested_thr = np.percentile(immax.flatten(), 99.9)
-        self.add_to_log(f"99.9 percentage threshold: {round(suggested_thr)}", True)
-        del max_rad, img, etatth, omgeta, omgtth, suggested_thr
+        etatth_rngs = []
+        omgeta_rngs = []
+        omgtth_rngs = []
+        for ir, rng in enumerate(rad_ranges):
+            imgp_rng = imgp[:,rng[0]:rng[1]]
+            etatth_rngs.append( imgp_rng )
+            omgeta_rngs.append( np.zeros([len(self.imgs), imgp_rng.shape[0]], dtype=np.float32) )
+            omgtth_rngs.append( np.zeros([len(self.imgs), imgp_rng.shape[1]], dtype=np.float32) )
+            omgeta_rngs[-1][0,:] = imgp_rng.sum(1)
+            omgtth_rngs[-1][0,:] = imgp_rng.sum(0)        
+
+        for ii in range(1,len(self.imgs)):
+            imsum += 1*self.imgs[ii]
+            imgp = warp_polar(1.*self.imgs[ii], center=q0_pos, radius=max_rad)
+            etatth = etatth + imgp
+            omgeta[ii,:] = imgp.sum(1)
+            omgtth[ii,:] = imgp.sum(0)
+            for ir, rng in enumerate(rad_ranges):
+                imgp_rng = imgp[:,rng[0]:rng[1]]
+                etatth_rngs[ir] = etatth_rngs[ir] + imgp_rng
+                omgeta_rngs[ir][ii,:] = imgp_rng.sum(1)
+                omgtth_rngs[ir][ii,:] = imgp_rng.sum(0)
+
+        mask_rng = 0*imsum
+        crds = np.mgrid[0:mask_rng.shape[1]:1, 0:mask_rng.shape[1]:1]
+        r = np.sqrt( (crds[0,:,:]-q0_pos[0] )**2 + (crds[1,:,:]-q0_pos[1])**2 )
+        for rng in rad_ranges:
+            d = abs(r - (rng[0]+rng[1])/2)
+            mask_rng[d<(rng[1]-rng[0])/2] = 1
+
+        self.set_attr('projs', {'imsum' :  imsum,  'immax':  immax, 'q0_pos': q0_pos,
+                                'etatth': etatth, 'omgtth': omgtth, 'omgeta': omgeta,
+                                'ranges': rad_ranges,
+                                'imsum_rngs' : imsum*mask_rng, 'immax_rngs': immax*mask_rng,
+                                'etatth_rngs':etatth_rngs, 'omgtth_rngs':omgtth_rngs, 'omgeta_rngs':omgeta_rngs})
+
+        del max_rad, imgp, etatth, omgeta, omgtth, imgp_rng, etatth_rngs, omgeta_rngs, omgtth_rngs
         return
 
-    
+
     def plot(self):        
         fig = plt.figure(figsize=(16, 10))
 
@@ -320,16 +432,73 @@ class SweepScan:
         return
     
 
-    def calculate_thresholds(self):
-        a = self.projs['immax'].flatten()
-        t4000 = 0.5*np.percentile(a, 99.69)+0.5*np.percentile(a, 99.72)
-        t2000 = 0.5*np.percentile(a, 99.37)+0.5*np.percentile(a, 99.38)
-        t1000 = 0.5*np.percentile(a, 98.88)+0.5*np.percentile(a, 98.88)
-        t0500 = 0.5*np.percentile(a, 98.17)+0.5*np.percentile(a, 98.16)
-        thr = 100*np.round(0.01*(0.25*t4000 + 0.5*t2000 + 1*t1000 + 2*t0500)/4)
-        return [int(t) for t in [thr, 2*thr, 4*thr, 8*thr]]
+#     def calculate_thresholds(self):
+# #         a = self.projs['immax'].flatten()
+# #         t4000 = 0.5*np.percentile(a, 99.69)+0.5*np.percentile(a, 99.72)
+# #         t2000 = 0.5*np.percentile(a, 99.37)+0.5*np.percentile(a, 99.38)
+# #         t1000 = 0.5*np.percentile(a, 98.88)+0.5*np.percentile(a, 98.88)
+# #         t0500 = 0.5*np.percentile(a, 98.17)+0.5*np.percentile(a, 98.16)
+# #         thr = 100*np.round(0.01*(0.25*t4000 + 0.5*t2000 + 1*t1000 + 2*t0500)/4)
+# #         return [int(t) for t in [thr, 2*thr, 4*thr, 8*thr]]
 
-                
+#         polarImage, ptSettings = polarTransform.convertToPolarImage(
+#             self.projs['immax'],
+#             center=[self.geometry.y_center, self.geometry.z_center])
+#         tth_profile = scipy.ndimage.gaussian_filter1d(
+#             np.nanpercentile(polarImage, 95, 0),
+#             6)
+#         pks_ind, pks_heights = scipy.signal.find_peaks(tth_profile, height = 3)
+#         highest_thr = np.mean(np.sort(pks_heights['peak_heights'])[-1:-4:-1]) # average of the highest 3 thresholds
+#         highest_thr = max(highest_thr, 256*32)
+#         thresholds = highest_thr*np.asarray( [2, 1, 1/2, 1/4, 1/8, 1/16, 1/32, 1/64, 1/128, 1/256] )
+#         self.set_attr('thresholds', [int(np.round(t)) for t in thresholds])
+    
+    
+    def calculate_thresholds(self):
+        from lmfit.models import LinearModel, GaussianModel, PseudoVoigtModel, LorentzianModel
+        immax_inpolar, ptSettings = polarTransform.convertToPolarImage(
+            self.projs['immax'],
+            center=[self.geometry.y_center, self.geometry.z_center]) # max projection in polar coordinates
+
+        immax_inpolar[immax_inpolar < 3] = np.nan
+        tth_immax_profile = np.nanpercentile(immax_inpolar, 99.9, 0) # peaks for each tth
+        tth_immax_profile[tth_immax_profile < 3] = np.nan
+        tth_immax_sorted = np.sort(tth_immax_profile)
+        tth_cleaned = [x for x in tth_immax_sorted if not np.isnan(x)][10:-10] # first 10 and the last 10 are better to drop
+
+        grad = np.gradient( scipy.ndimage.gaussian_filter1d(tth_cleaned, 50) ) # gradient profile to eliminate the bad regions in the beginning and end
+        pks_ind, pks_heights = scipy.signal.find_peaks(grad, height = 0.1)
+        if len(pks_ind) > 1:
+            tth_cleaned = tth_cleaned[pks_ind[0]:pks_ind[-1]] # before the first peaks the intensities are some irregular noise or artifacts. After the last peak it is also not relevant.
+
+        x = np.linspace(0, len(tth_cleaned), num = len(tth_cleaned))
+        y = np.asarray(tth_cleaned)
+
+        pseudo_voigt = PseudoVoigtModel(prefix = 'PseudoVoigtModel_')
+        pars = pseudo_voigt.guess(y, x = x)
+
+        lin_mod = LinearModel(prefix = 'Linear_')
+        pars.update(lin_mod.make_params())
+
+        mod = pseudo_voigt + lin_mod
+
+        init = mod.eval(pars, x = x)
+        out  = mod.fit(y, pars, x = x)
+
+        diff = scipy.ndimage.gaussian_filter1d(out.best_fit - y, 30)
+        diff_pks_ind, diff_pks_heights = scipy.signal.find_peaks(diff, height = 3)
+
+        gradgrad = np.gradient(np.gradient( scipy.ndimage.gaussian_filter1d(tth_cleaned, 30) ))# gradient profile to eliminate the bad regions in the beginning and end
+        pks_ind, pks_heights = scipy.signal.find_peaks(gradgrad, height = 0.001)
+
+        dists = [abs(p - diff_pks_ind[0]) for p in pks_ind] # searching fro the closest gradgrad peak 
+        base_thr = tth_cleaned[ pks_ind[np.argmin(dists)] ]
+
+        thresholds = base_thr*np.asarray( [2028, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1, 1/2] )
+        thresholds = np.asarray([t for t in thresholds if t > 9 and t < np.max(self.projs['immax'])/2]) # reasonable range is [9 counts, max_intentsity/2] 
+        self.set_attr('thresholds', [int(np.round(t)) for t in thresholds])
+    
+    
     def export_data(self, thr=None):
         # Export data using a certain threshold.
         self.add_to_log("Exporting data as: "+self.directory+self.name, True)
@@ -337,7 +506,7 @@ class SweepScan:
             os.makedirs(self.directory)
             self.add_to_log('Created directory: '+self.directory, True)
         
-        if not thr: thr = min(self.thresholds)
+        if not thr or thr == 'auto': thr = min(self.thresholds)
     
         path = self.directory+self.name
         
@@ -349,39 +518,62 @@ class SweepScan:
         
         try:
             self.add_to_log('Writing file: '+path+"_bckg.tif", True)
-            imageio.imwrite(path+"_bckg.tif"       , self.processing['bckg'])
+            tifffile.imsave(path+"_bckg.tif"       , self.processing['bckg'])
         except: self.add_to_log('Failed to write *_bckg.tif file!', True)
+        
+        
+        if not os.path.exists(self.directory+'projs_ranges/'):
+            os.makedirs(self.directory+'projs_ranges/')
+            self.add_to_log('Created directory: '+self.directory+'projs_ranges/', True)
+
+        path = self.directory+'projs_ranges/'+self.name
+        path.replace(path.split('/')[-1], '')
+        del_old  = subprocess.call('rm '+path+'*', shell=True)
+        if del_old == 0: self.add_to_log(f"Deleted old files.", True)        
         
         try:
             self.add_to_log('Writing file: '+path+"_proj_immax.tif", True)
-            imageio.imwrite(path+"_proj_immax.tif" , self.projs['immax'])
+            tifffile.imsave(path+"_proj_immax.tif", self.projs['immax'])
         except: self.add_to_log('Failed to write *_proj_immax.tif file!', True)
         
         try:        
             self.add_to_log('Writing file: '+path+"_proj_imsum.tif", True)
-            imageio.imwrite(path+"_proj_imsum.tif" , self.projs['imsum'])
+            tifffile.imsave(path+"_proj_imsum.tif" , self.projs['imsum'])
         except: self.add_to_log('Failed to write *_proj_imsum.tif file!', True)
 
         try:            
             self.add_to_log('Writing file: '+path+"_proj_etatth.tif", True)
-            imageio.imwrite(path+"_proj_etatth.tif", self.projs['etatth'])
+            tifffile.imsave(path+"_proj_etatth.tif", self.projs['etatth'])
         except: self.add_to_log('Failed to write *_proj_etatth.tif file!', True)
 
         try:            
             self.add_to_log('Writing file: '+path+"_proj_omgtth.tif", True)
-            imageio.imwrite(path+"_proj_omgtth.tif", self.projs['omgtth'])
+            tifffile.imsave(path+"_proj_omgtth.tif", self.projs['omgtth'])
         except: self.add_to_log('Failed to write *_proj_omgtth.tif file!', True)
 
         try:            
             self.add_to_log('Writing file: '+path+"_proj_omgeta.tif", True)
-            imageio.imwrite(path+"_proj_omgeta.tif", self.projs['omgeta'])
+            tifffile.imsave(path+"_proj_omgeta.tif", self.projs['omgeta'])
         except: self.add_to_log('Failed to write *_proj_omgeta.tif file!', True)
-
+        
+        
+        try:
+            tifffile.imsave(path+"_imsum_rngs.tif", self.projs['imsum_rngs'])
+            tifffile.imsave(path+"_immax_rngs.tif", self.projs['immax_rngs'])
+            for ir, rng in enumerate(self.projs['ranges']):
+                tifffile.imsave(path+f"_etatth_rngs-{rng[0]}-{rng[1]}.tif", self.projs['etatth_rngs'][ir])
+                tifffile.imsave(path+f"_omgtth_rngs-{rng[0]}-{rng[1]}.tif", self.projs['omgtth_rngs'][ir])
+                tifffile.imsave(path+f"_omgeta_rngs-{rng[0]}-{rng[1]}.tif", self.projs['omgeta_rngs'][ir])
+        except: self.add_to_log('Failed to write range projections *.tif files!', True)
 #         try:            
 #             self.add_to_log('Writing file: '+path+"_omegas.npy", True)
 #             np.save(path+"_omegas.npy", self.chunk['omegas'])
 #         except: self.add_to_log('Failed to write *_omegas.npy file!', True)
-        
+
+        self.geometry.save_par( directory = self.directory,  par_file = self.name+'.par',  overwrite = True)
+        self.geometry.save_yml( directory = self.directory,  yml_file = self.name+'.yml',  overwrite = True)
+        self.geometry.save_poni(directory = self.directory, poni_file = self.name+'.poni', overwrite = True)
+            
         return
 
 
@@ -402,14 +594,17 @@ class SweepScan:
     def peaksearch(self, thresholds = [], spline_path = None):
         if thresholds: self.set_attr('thresholds', thresholds)
         self.add_to_log(f'Running peaksearch on {len(self.imgs)} images using {len(self.thresholds)} thresholds...', True)
-        
+            
         if spline_path:
             os.system('cp '+spline_path+' '+self.directory+self.name+'.spline') # Copy spline file here
-            self.set_attr('spline_file', self.name+'.spline')
-        elif self.spline_file and not os.path.exists(self.directory+self.spline_file):
-            os.system('cp '+self.spline_file+' '+self.directory+self.name+'.spline') # Probably it is some other directory so need to be copied here
-            self.set_attr('spline_file', self.name+'.spline')
-        else: self.set_attr('spline_file', None)
+            self.geometry.set_attr('spline_file', self.name+'.spline')
+        elif self.geometry.spline_file:
+            spline_path = self.geometry.directory + self.geometry.spline_file
+            os.system('cp '+spline_path+' '+self.directory+self.name+'.spline') # Copy spline file here
+            self.geometry.set_attr('spline_file', self.name+'.spline')
+        else:
+            os.system('rm '+self.directory+self.name+'.spline') # Delete as not relevant
+            self.geometry.set_attr('spline_file', None)        
         
 #         def one_thr(thr):
 #             peaksfile = open(self.directory+self.name+f'_peaks_t{thr}.flt', 'w')
@@ -427,6 +622,7 @@ class SweepScan:
 #             p.map(one_thr, self.thresholds)
 #         for r in res:
 #             self.add_to_log(r, True)
+        from ImageD11 import labelimage
         for i_thr, thr in enumerate(self.thresholds):
             print(f'Threshold {thr}, saving results to:')
             peaksfile = open(self.directory+self.name+f'_peaks_t{thr}.flt', 'w')
@@ -439,11 +635,11 @@ class SweepScan:
             peaksfile.close()
             self.add_to_log(self.directory+self.name+f'_peaks_t{thr}.flt', True)
         
-        if self.spline_file:
+        if self.geometry.spline_file:
             for thr in self.thresholds:
                 flt_file = self.directory+self.name+f'_peaks_t{thr}.flt'
-                apply_spline_to_fltfile(flt_file, flt_file, self.spline_file, self.projs['immax'].shape[0])
-                self.add_to_log(f"For {flt_file} and threshold {thr} applied spline file:", self.spline)
+                apply_spline_to_fltfile(flt_file, flt_file, self.geometry.spline_file, self.projs['immax'].shape[0])
+                self.add_to_log(f"For {flt_file} and threshold {thr} applied spline file:", self.geometry.spline_file)
 
         return
 
@@ -466,11 +662,15 @@ class SweepScan:
         
         if spline_path:
             os.system('cp '+spline_path+' '+self.directory+self.name+'.spline') # Copy spline file here
-            self.set_attr('spline_file', self.name+'.spline')
-        elif self.spline_file and not os.path.exists(self.directory+self.spline_file):
-            os.system('cp '+self.spline_file+' '+self.directory+self.name+'.spline') # Probably it is some other directory so need to be copied here
-            self.set_attr('spline_file', self.name+'.spline')
-        else: self.set_attr('spline_file', None)
+            self.geometry.set_attr('spline_file', self.name+'.spline')
+        elif self.geometry.spline_file:
+            if self.geometry.spline_file[0] == '/':
+                os.system('cp '+self.geometry.spline_file+' '+self.directory+self.name+'.spline') # Probably it is some other directory so need to be copied here
+            else:
+                os.system('cp '+self.geometry.directory+self.geometry.spline_file+' '+self.directory+self.name+'.spline') # Probably it is some other directory so need to be copied here
+            self.geometry.set_attr('spline_file', self.name+'.spline')
+        elif os.path.exists(self.directory+self.name+'.spline'):
+            os.system('rm '+self.directory+self.name+'.spline') # Delete as not relevant
         
         self.add_to_log('Writing file: '+self.directory+self.name+'_peaksearch.yaml', True)
         with open(self.directory+self.name+'_peaksearch.yaml', 'w') as f:
@@ -487,7 +687,7 @@ class SweepScan:
             f.write('\ndark_image: {}'.format(self.directory+self.name+'_bckg.tif'))
             f.write('\nthresholds: {}'.format(thresholds))
             if spline_path:
-                f.write('\nspline: {}'.format(self.directory+self.spline_file))
+                f.write('\nspline: {}'.format(self.directory+self.geometry.spline_file))
             f.write('\noutput_dir: {}'.format(self.directory))
             f.write('\nstem_out: {}'.format(self.name))
             f.write('\n#kwargs: \'--OmegaOverride\'#additional keyword aguments for peaksearch.py as one string')
@@ -520,7 +720,7 @@ class SweepScan:
             self.add_to_log(f"Saving temporary images in "+self.directory+self.name+"_temp/", True)
             for ind, img in enumerate(self.imgs):
                 dig_part = str(first_im+ind).zfill(pars['ndigits'])
-                imageio.imwrite(path_inp+dig_part+pars['image_ext'], img)
+                tifffile.imsave(path_inp+dig_part+pars['image_ext'], img)
         else:
             path_inp = os.path.join(pars['image_dir'], pars['image_stem'])
 
@@ -562,8 +762,11 @@ class SweepScan:
         self.set_attr('thresholds', pars['thresholds'])
         
         if 'spline' in pars.keys():
+            self.geometry.set_attr('spline_file', pars['spline'])
             for t in pars['thresholds']:
                 flt_file = pars['output_dir']+pars['stem_out']+f'_peaks_t{t}.flt'
+                os.system('cp '+flt_file+' '+flt_file.replace('.flt', '_nospline.flt')) #
+                self.add_to_log(f'Saved '+flt_file.replace('.flt', '_nospline.flt')+' file (backup).')
                 apply_spline_to_fltfile(flt_file, flt_file, pars['spline'], self.projs['immax'].shape[0])
                 self.add_to_log(f"For {flt_file} and threshold {t} applied spline file:", pars['spline'])
                      
@@ -573,7 +776,12 @@ class SweepScan:
         return
 
     
-    def merge_peaks(self, par_file, yaml_file='auto'): # Wrapper for ImageD11 merge_flt.py
+    def merge_peaks(self, yaml_file='auto'): # Wrapper for ImageD11 merge_flt.py
+        try:
+            self.geometry.save_par(overwrite=True)
+        except:
+            raise FileNotFoundError('Could not write *par file!')
+                
         if yaml_file == 'auto': yaml_file = self.save_peaksearch_yaml()
         with open(yaml_file) as f: pars = yaml.safe_load(f)
         if pars['stem_out'] == None: pars['stem_out'] = ''
@@ -581,8 +789,9 @@ class SweepScan:
         if 'merged_name' in pars:
             file_out = os.path.join(pars['output_dir'],pars['merged_name'])
         else:
-            file_out = os.path.join(pars['output_dir'],pars['stem_out']+'_peaks_merged.flt')
+            file_out = os.path.join(pars['output_dir'],pars['stem_out']+'.flt')
         inp = os.path.join(pars['output_dir'], pars['stem_out']+'_peaks')
+        par_file  = self.geometry.directory+self.geometry.par_file
         # construct the command for merge_flt.py
         command = 'merge_flt.py {} {} {} {:d} '.format(par_file,inp,file_out,pars['pixel_tol'])
         command+= ('{:d} '*len(pars['thresholds'])).format(*pars['thresholds'])
@@ -603,8 +812,21 @@ class SweepScan:
             os.makedirs(path)
             self.add_to_log('Created directory: '+path, True)
         for i in range(0,len(self.imgs)):
-            imageio.imwrite(path+"{:04d}.tif".format(i), np.float32(self.imgs[i]))
+            tifffile.imsave(path+"{:04d}.tif".format(i), np.float32(self.imgs[i]))
         self.add_to_log(f"Saved {len(self.imgs)} .tif files", True)        
+        return
+    
+    
+    def crop_imgs(self, roi):
+        imgs = []
+        for img in self.imgs:
+            imgs.append(img[roi[0]:roi[1], roi[2]:roi[3]])
+        self.set_attr('imgs', imgs)
+        self.geometry.set_attr('y_center', self.geometry.y_center-roi[0])
+        self.geometry.set_attr('z_center', self.geometry.z_center-roi[2])
+        self.geometry.set_attr('dety_size', roi[1]-roi[0])
+        self.geometry.set_attr('detz_size', roi[3]-roi[2])
+        self.add_to_log(f"Cropped images according to roi: {roi}", True)        
         return
     
     
@@ -614,14 +836,30 @@ class SweepScan:
         self.add_to_log(f"Deleted temporary .tif files", True)
         return
     
-                        
+    def generate_PeakIndexer(self, directory = None, name = None):
+        if not directory: directory = self.directory
+        if not name: name = self.name
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+            self.add_to_log('Created directory: '+directory, True)
+        PI = PeakIndexer(directory = directory)
+        PI.load_flt(flt_file = name+'.flt') # merged
+        PI.set_attr('geometry', self.geometry)
+        PI.geometry.omegasign = abs(PI.geometry.omegasign)
+#         PI.geometry.save_par(directory = directory, par_file = name+'.par', overwrite = True)
+        self.add_to_log('Generated PeakIndexer in '+PI.directory+' named '+PI.name, True)
+        return PI
+
+
 def calculate_bckg(imgs, indices): # Uses median of a subset of images
     try: sub_set = np.asarray( [imgs[i] for i in indices] )
     except: raise ValueError(' - incorrect indices!')
-    return np.median(sub_set,axis=0).astype(float32)
+    I = [img.mean() for img in imgs]
+    norm  = np.max(I)/np.mean(I) # This corrects for non-uniformities in the sweep's total intensity profile
+    return norm*np.median(sub_set,axis=0).astype(float32)
 
 
-def apply_spline_to_fltfile(flt_file_in, flt_file_out, spline, sc_dim):
+def apply_spline_to_fltfile(flt_file_in, flt_file_out, spline, sc_dim): # MUST BE CHECKED BEFORE USING!
     from ImageD11 import columnfile, blobcorrector
     if spline == 'perfect':
         cor = blobcorrector.perfect()
@@ -646,7 +884,7 @@ def apply_spline_to_fltfile(flt_file_in, flt_file_out, spline, sc_dim):
 # iC = 0
 # frames = list(range(iC+1,iC+559))
 
-# G = SweepScan('/home/shabalin/11008399/test/','V4_test')
+# G = SweepProcessor('/home/shabalin/11008399/test/','V4_test')
 # G.load_sweep(omega_start=omega_start, omega_step=omega_step,
 #                     directory=path_inp, stem='sweep_', ndigits=5, ext='.tif',
 #                     frames=frames)
