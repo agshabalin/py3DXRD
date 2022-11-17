@@ -488,11 +488,12 @@ class SweepProcessor:
         diff = scipy.ndimage.gaussian_filter1d(out.best_fit - y, 30)
         diff_pks_ind, diff_pks_heights = scipy.signal.find_peaks(diff, height = 3)
 
-        gradgrad = np.gradient(np.gradient( scipy.ndimage.gaussian_filter1d(tth_cleaned, 30) ))# gradient profile to eliminate the bad regions in the beginning and end
-        pks_ind, pks_heights = scipy.signal.find_peaks(gradgrad, height = 0.001)
+#         gradgrad = np.gradient(np.gradient( scipy.ndimage.gaussian_filter1d(tth_cleaned, 30) ))# gradient profile to eliminate the bad regions in the beginning and end
+#         pks_ind, pks_heights = scipy.signal.find_peaks(gradgrad, height = 0.001)
 
-        dists = [abs(p - diff_pks_ind[0]) for p in pks_ind] # searching fro the closest gradgrad peak 
-        base_thr = tth_cleaned[ pks_ind[np.argmin(dists)] ]
+#         dists = [abs(p - diff_pks_ind[0]) for p in pks_ind] # searching fro the closest gradgrad peak 
+#         base_thr = tth_cleaned[ pks_ind[np.argmin(dists)] ]
+        base_thr = y[diff_pks_ind[0]]
 
         thresholds = base_thr*np.asarray( [2028, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1, 1/2] )
         thresholds = np.asarray([t for t in thresholds if t > 9 and t < np.max(self.projs['immax'])/2]) # reasonable range is [9 counts, max_intentsity/2] 
