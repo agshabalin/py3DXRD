@@ -122,7 +122,7 @@ for i_load in load_states[:]: #
             
             DATA = set_DATA(i_load, i_slow, i_fast, detectors, material)
             
-            DATA.process_images(frames = 'all', thr = 'auto')
+            DATA.process_images(frames = [1, 2, 3, 4, 5], thr = 'auto')
             DATA.peaksearch(peaksearch_thresholds = 'auto', peakmerge_thresholds = 'auto', min_peak_dist = 10)
             pickle.dump(DATA, open(DATA.directory+DATA.name+"_DATA.p","wb") )
             
