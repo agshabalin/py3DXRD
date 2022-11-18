@@ -652,12 +652,12 @@ class SweepProcessor:
         elif 'auto' in thresholds:
             thresholds = self.calculate_thresholds()
         
-        try:
-            suggested_thr = np.percentile(self.projs['immax'].flatten(), 99.9)
-            if thresholds[0] > suggested_thr:
-                print('WARNING! Provided thresholds:', thresholds, f'are higher than 99.9 percentile: {suggested_thr}!')
-        except:
-            pass
+#         try:
+#             suggested_thr = np.percentile(self.projs['immax'].flatten(), 99.9)
+#             if thresholds[0] > suggested_thr:
+#                 print('WARNING! Provided thresholds:', thresholds, f'are higher than 99.9 percentile: {suggested_thr}!')
+#         except:
+#             pass
     
         if not pix_tol: pix_tol = self.pix_tol
         

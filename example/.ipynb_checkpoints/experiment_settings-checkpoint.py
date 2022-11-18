@@ -15,21 +15,9 @@ from py3DXRD.p212_tools import load_p212_log, load_p212_fio, parse_p212_command
 single_separator = "--------------------------------------------------------------"
 double_separator = "=============================================================="
 
-### MATERIAL TABLE. SETTING WORKING DIRECTORY.
-path_gen = '/asap3/petra3/gpfs/p21.2/2022/data/11013744/'
-materials_table = {'Au'  : {'name': 'Au'  , 'spacegroup': 225, 'symmetry':'F', 'unitcell': [4.0720, 4.0720,  4.0720, 90., 90.,  90.]},
-                   'CeO2': {'name': 'CeO2', 'spacegroup': 225, 'symmetry':'F', 'unitcell': [5.4115, 5.4115,  5.4115, 90., 90.,  90.]},
-                   'Cu'  : {'name': 'Cu'  , 'spacegroup': 225, 'symmetry':'F', 'unitcell': [3.5942, 3.5942,  3.5942, 90., 90.,  90.]},
-                   'LaB6': {'name': 'LaB6', 'spacegroup': 221, 'symmetry':'P', 'unitcell': [4.1568, 4.1568,  4.1568, 90., 90.,  90.]},
-                   'MgCa': {'name': 'MgCa', 'spacegroup': 194, 'symmetry':'P', 'unitcell': [3.1980, 3.1980,  5.1900, 90., 90., 120.]},
-                   'Nb'  : {'name': 'Nb'  , 'spacegroup': 229, 'symmetry':'I', 'unitcell': [3.3042, 3.3042,  3.3042, 90., 90.,  90.]},
-                   'Ni'  : {'name': 'Ni'  , 'spacegroup': 225, 'symmetry':'F', 'unitcell': [3.5100, 3.5100,  3.5100, 90., 90.,  90.]},
-                   'Pd'  : {'name': 'Pd'  , 'spacegroup': 225, 'symmetry':'F', 'unitcell': [3.8907, 3.8907,  3.8907, 90., 90.,  90.]},
-                   'Ruby': {'name': 'Ruby', 'spacegroup': 167, 'symmetry':'R', 'unitcell': [4.7608, 4.7608, 12.9957, 90., 90., 120.]},
-                   'Ti'  : {'name': 'Ti'  , 'spacegroup': 194, 'symmetry':'P', 'unitcell': [2.9505, 2.9505,  4.6826, 90., 90., 120.]}}
 
 ### SETTING THE SWEEP PARAMETERS:
-def set_p212_sweep(i_slow, i_fast, det_num, default_xyz = [0,0,0], meta_key = None):
+def set_p212_sweep(path_gen, i_slow, i_fast, det_num, default_xyz = [0,0,0], meta_key = None):
     # meta_key is either full path to .fio file or .log file or a string with sweep command.
     x,y,z = None,None,None
     if '.log' in meta_key.split()[-1]:
@@ -135,7 +123,7 @@ def set_p212_sweep(i_slow, i_fast, det_num, default_xyz = [0,0,0], meta_key = No
     return SP
 
 ### SETTING THE GRAINSPOTTER PARAMETERS;
-def set_grainspotter(material=None, domega = None):
+def set_grainspotter(path_gen, material=None, domega = None):
     GS = py3DXRD.GrainSpotter(directory = path_gen + 'processed/')
     if material: GS.set_attr('spacegroup'   , material['spacegroup'])
     if domega: GS.set_attr('domega'       , domega)
@@ -151,6 +139,7 @@ def set_grainspotter(material=None, domega = None):
     GS.set_attr('random', 10000)
     GS.set_attr('positionfit', True)
     return GS
+
 
 ### SETTING THE POLYXSIM PARAMETERS:
 def set_polyxsim(grainspotter, material = None):
@@ -181,5 +170,3 @@ def set_polyxsim(grainspotter, material = None):
     return PS
 
 print(single_separator+'\nSETTINGS LOADED!')
-# print(f'Path:', path_gen)
-# print('Material:', material)

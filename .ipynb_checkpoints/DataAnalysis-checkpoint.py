@@ -87,7 +87,7 @@ class DataAnalysis:
     
     def save_geometries_as_yml(self, yml_det_order = None):
         if yml_det_order: self.set_attr('yml_det_order', yml_det_order)
-        gs = [self.sweepProcessors[ind].geometry for ind in self.yml_det_order]
+        gs = [self.sweepProcessors[ind-1].geometry for ind in self.yml_det_order]
         yml_file = py3DXRD.Geometry.save_geometries_as_yml(gs, self.directory, self.name+'.yml', overwrite = True)
         self.add_to_log('Exported all the geometries as .yml file: ' + yml_file, True)
         return
@@ -168,6 +168,7 @@ class DataAnalysis:
             pickle.dump(PI, open(PI.directory+PI.name+"_PeakIndexer.p","wb") )
             self.add_to_attr('peakIndexers', PI)
         self.set_attr('gvectorEvaluator', GE)
+        self.save_geometries_as_yml()
         
         
     def evaluateGvectors(self, tth_gap=0.5, ds_gap=0.1, eta_gap=1, omega_gap = None, to_plot = True, save_arrays = False):
