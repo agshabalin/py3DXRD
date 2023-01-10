@@ -239,8 +239,7 @@ class Grain:
         f.write('# '+' '.join(titles) + '\n')
         for g in list_of_grains:
             values = [g.grain_id, g.mean_IA, g.pos_chisq] + g.position + g.u.flatten().tolist() + g.ubi.flatten().tolist()
-            s = [f'{v:d}' if type(v)==type(1) else f'{v:f}' for v in values]
-            f.write('  ' + '  '.join(s) + '\n' )
+            f.write('  ' + '  '.join([f'{v}' for v in values]) + '\n' )
         f.close()
         print('File closed!')
         return
