@@ -288,11 +288,19 @@ class DataAnalysis:
         self.grainSpotter.run_grainspotter(
             gve_file=self.name + '.gve',
             log_file=self.name + '.log')
-        self.set_attr(
-            'grains',
-            py3DXRD.Grain.load_log(
-                directory=self.directory,
-                log_file=self.grainSpotter.log_file))
+        # Below we load .log file (more parameters but lower precision)
+        # and .gff (fewer parameters but higher precision) and merge them
+        grains_log = py3DXRD.Grain.load_log(self.directory, self.name+'.log')
+        grains_gff = py3DXRD.Grain.load_gff(self.directory, self.name+'.gff')
+        for gl in grains_log:
+            gf = [g for g in grains_gff if g.grain_id == gl.grain_id][0]
+            gl.set_attr('mean_IA', gf.mean_IA)
+            gl.set_attr('pos_chisq', gf.pos_chisq)
+            gl.set_attr('position', gf.position)
+            gl.set_attr('u', gf.u)
+            gl.set_attr('ubi', gf.ubi)
+        self.set_attr('grains', grains_log)
+        
         pickle.dump(
             self.grainSpotter,
             open(

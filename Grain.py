@@ -101,10 +101,12 @@ class Grain:
         return
 
     
-    def load_log(directory = None, log_file = None):
-        print(double_separator + 'Reading file: ' + directory+log_file)
+    def load_log(directory, log_file):
+        print(double_separator + 'Reading file: ' + directory + log_file)
+        if not os.path.isfile(directory + log_file): raise FileNotFoundError
+
         header = []
-        f = open(directory+log_file,"r")
+        f = open(directory + log_file,"r")
         line = f.readline()
         while line and '#  gvector_id' not in line:
             if 'Found' in line and 'grains' in line: # the very 1st line in file
@@ -186,8 +188,10 @@ class Grain:
         return list_of_grains
     
 
-    def load_gff(directory = None, gff_file = None):
-        print(double_separator + 'Reading file: ' + directory+gff_file)
+    def load_gff(directory, gff_file):
+        print(double_separator + 'Reading file: ' + directory + gff_file)
+        if not os.path.isfile(directory + gff_file): raise FileNotFoundError
+
         list_of_grains = []
         titles = "grain_id mean_IA chisq x y z U11 U12 U13 U21 U22 U23 U31 U32 U33 UBI11 UBI12 UBI13 UBI21 UBI22 UBI23 UBI31 UBI32 UBI33".split()
         with open(directory+gff_file, "r") as f:
@@ -199,7 +203,7 @@ class Grain:
                     g = Grain(directory, int(x['grain_id']))
                     g.set_attr('gff_file' , gff_file)
                     g.set_attr('mean_IA'  , float(x['mean_IA']) )
-                    g.set_attr('pos_chisq', float(x['mean_IA']) )
+                    g.set_attr('pos_chisq', float(x['chisq']) )
                     g.set_attr('position' , [float(x['x']), float(x['y']), float(x['z'])] )
                     raw_0 = [float(v) for v in [x['U11'], x['U12'], x['U13']] ]
                     raw_1 = [float(v) for v in [x['U21'], x['U22'], x['U23']] ]
@@ -215,9 +219,11 @@ class Grain:
         return list_of_grains
     
     
-    def save_gff(directory = None, gff_file = None, list_of_grains = None, overwrite = False):
-        print(double_separator + 'Writing file: ' + directory+gff_file)
-        if not os.path.exists(directory): os.makedirs(directory)
+    def save_gff(directory, gff_file, list_of_grains = None, overwrite = False):
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+            self.add_to_log('Created directory: '+directory, True)
+        print(f'Writing file: {directory+gff_file}', True)
 
         while os.path.isfile(directory+gff_file):
             print('File already exist!')
@@ -238,8 +244,11 @@ class Grain:
         f = open(directory+gff_file ,"w") 
         f.write('# '+' '.join(titles) + '\n')
         for g in list_of_grains:
-            values = [g.grain_id, g.mean_IA, g.pos_chisq] + g.position + g.u.flatten().tolist() + g.ubi.flatten().tolist()
-            f.write('  ' + '  '.join([f'{v}' for v in values]) + '\n' )
+            s1 = ["{:d}".format(g.grain_id)]
+            s2 = ["{:0.7f}".format(v) for v in [g.mean_IA, g.pos_chisq]+g.position]
+            s3 = ["{:0.12f}".format(v) for v in g.u.flatten().tolist()]
+            s4 = ["{:0.12f}".format(v) for v in g.ubi.flatten().tolist()]
+            f.write(' '.join(s1+s2+s3+s4) + '\n' )
         f.close()
         print('File closed!')
         return
