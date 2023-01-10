@@ -6,6 +6,7 @@ Created on Mon Oct 11 11:30:49 2021
 
 """
 import numpy as np
+import xfab
 
 def mod_360(angle, target):
     """
@@ -105,3 +106,36 @@ def merge_overlaps(ranges_in, margin, target=None):
             ranges[0][0] = target-180
             ranges[-1][1] = target+180
     return ranges
+
+
+def disorientation(umat_1, umat_2, sgno = 141, return_axis=False):
+    """
+    Determines the disorientation (smallest misorientation) between grain orientations
+    Input:      umat_1, umat_2 orientation matrices
+                sgno: number of space group
+    """
+    space_group = xfab.sg.sg(sgno=sgno)
+    Rs = np.unique(space_group.rot,axis=0) #unique symmetry operations in space group
+    th = []
+    axes = []
+    for Ri in Rs:
+        ui = np.dot(umat_1,Ri)
+        for Rj in [np.eye(3)]:#Rs: #only need one symmetry operation I think
+            uj = np.dot(umat_2,Rj)
+            g = np.dot(uj,np.transpose(ui)) #(RU)^-1=(RU)^T
+            detg = np.linalg.det(g)
+            l = 0.5*(np.trace(g)-1)
+            if np.abs(l) > 1.00000000:
+                if l > 1:
+                    l = 1.
+                else:
+                    l = -1.
+            tt = np.arccos(l)
+            if return_axis:
+                n = (1./np.sin(tt))*(g-g.T)
+                axes.append([n[2,1],-n[2,0],n[1,0]])
+            th.append(tt*180./np.pi)
+    if return_axis:
+        return min(th), axes[np.argmin(th)]
+    else:
+        return min(th)

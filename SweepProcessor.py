@@ -352,8 +352,8 @@ class SweepProcessor:
         etatth = imgp
         omgeta = np.zeros([len(self.imgs), imgp.shape[0]], dtype=np.float32)
         omgtth = np.zeros([len(self.imgs), imgp.shape[1]], dtype=np.float32)
-        omgeta[0,:] = imgp.sum(1)
-        omgtth[0,:] = imgp.sum(0)
+        omgeta[0,:] = np.nansum(imgp, 1)
+        omgtth[0,:] = np.nansum(imgp, 0)
 
         etatth_rngs = []
         omgeta_rngs = []
@@ -363,20 +363,20 @@ class SweepProcessor:
             etatth_rngs.append( imgp_rng )
             omgeta_rngs.append( np.zeros([len(self.imgs), imgp_rng.shape[0]], dtype=np.float32) )
             omgtth_rngs.append( np.zeros([len(self.imgs), imgp_rng.shape[1]], dtype=np.float32) )
-            omgeta_rngs[-1][0,:] = imgp_rng.sum(1)
-            omgtth_rngs[-1][0,:] = imgp_rng.sum(0)        
+            omgeta_rngs[-1][0,:] = np.nansum(imgp_rng, 1)
+            omgtth_rngs[-1][0,:] = np.nansum(imgp_rng, 0)        
 
         for ii in range(1,len(self.imgs)):
             imsum += 1*self.imgs[ii]
             imgp = warp_polar(1.*self.imgs[ii], center=q0_pos, radius=max_rad)
             etatth = etatth + imgp
-            omgeta[ii,:] = imgp.sum(1)
-            omgtth[ii,:] = imgp.sum(0)
+            omgeta[ii,:] = np.nansum(imgp, 1)
+            omgtth[ii,:] = np.nansum(imgp, 0)
             for ir, rng in enumerate(rad_ranges):
                 imgp_rng = imgp[:,rng[0]:rng[1]]
                 etatth_rngs[ir] = etatth_rngs[ir] + imgp_rng
-                omgeta_rngs[ir][ii,:] = imgp_rng.sum(1)
-                omgtth_rngs[ir][ii,:] = imgp_rng.sum(0)
+                omgeta_rngs[ir][ii,:] = np.nansum(imgp_rng, 1)
+                omgtth_rngs[ir][ii,:] = np.nansum(imgp_rng, 0)
 
         mask_rng = 0*imsum
         crds = np.mgrid[0:mask_rng.shape[1]:1, 0:mask_rng.shape[1]:1]
@@ -462,40 +462,26 @@ class SweepProcessor:
 
         immax_inpolar[immax_inpolar < 3] = np.nan
         tth_immax_profile = np.nanpercentile(immax_inpolar, 99.9, 0) # peaks for each tth
-        tth_immax_profile[tth_immax_profile < 3] = np.nan
-        tth_immax_sorted = np.sort(tth_immax_profile)
-        tth_cleaned = [x for x in tth_immax_sorted if not np.isnan(x)][10:-10] # first 10 and the last 10 are better to drop
+        tth_smoothed = scipy.ndimage.gaussian_filter1d(tth_immax_profile, 10)
+        tth_pks_ind = scipy.signal.find_peaks(tth_smoothed, distance =10, height = 3)[0]
+        tth_peaks_sorted = np.sort([tth_smoothed[ind] for ind in tth_pks_ind])
 
-        grad = np.gradient( scipy.ndimage.gaussian_filter1d(tth_cleaned, 50) ) # gradient profile to eliminate the bad regions in the beginning and end
-        pks_ind, pks_heights = scipy.signal.find_peaks(grad, height = 0.1)
-        if len(pks_ind) > 1:
-            tth_cleaned = tth_cleaned[pks_ind[0]:pks_ind[-1]] # before the first peaks the intensities are some irregular noise or artifacts. After the last peak it is also not relevant.
-
-        x = np.linspace(0, len(tth_cleaned), num = len(tth_cleaned))
-        y = np.asarray(tth_cleaned)
+        x = np.linspace(0, len(tth_peaks_sorted), num = len(tth_peaks_sorted))
+        y = np.asarray(tth_peaks_sorted)
 
         pseudo_voigt = PseudoVoigtModel(prefix = 'PseudoVoigtModel_')
         pars = pseudo_voigt.guess(y, x = x)
-
         lin_mod = LinearModel(prefix = 'Linear_')
         pars.update(lin_mod.make_params())
-
         mod = pseudo_voigt + lin_mod
-
         init = mod.eval(pars, x = x)
         out  = mod.fit(y, pars, x = x)
 
-        diff = scipy.ndimage.gaussian_filter1d(out.best_fit - y, 30)
-        diff_pks_ind, diff_pks_heights = scipy.signal.find_peaks(diff, height = 3)
+        diff = abs(scipy.ndimage.gaussian_filter1d(out.best_fit - y, 3))
 
-#         gradgrad = np.gradient(np.gradient( scipy.ndimage.gaussian_filter1d(tth_cleaned, 30) ))# gradient profile to eliminate the bad regions in the beginning and end
-#         pks_ind, pks_heights = scipy.signal.find_peaks(gradgrad, height = 0.001)
-
-#         dists = [abs(p - diff_pks_ind[0]) for p in pks_ind] # searching fro the closest gradgrad peak 
-#         base_thr = tth_cleaned[ pks_ind[np.argmin(dists)] ]
-        base_thr = y[diff_pks_ind[0]]
-
-        thresholds = base_thr*np.asarray( [2028, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1, 1/2] )
+        diff_pks = scipy.signal.find_peaks(diff, distance =3, height = 3)[0]
+        base_thr = 2*(3 + y[int(diff_pks[0]/2)])
+        thresholds = base_thr*np.asarray( [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096] )
         thresholds = np.asarray([t for t in thresholds if t > 9 and t < np.max(self.projs['immax'])/2]) # reasonable range is [9 counts, max_intentsity/2] 
         self.set_attr('thresholds', [int(np.round(t)) for t in thresholds])
     
@@ -522,16 +508,14 @@ class SweepProcessor:
             tifffile.imsave(path+"_bckg.tif"       , self.processing['bckg'])
         except: self.add_to_log('Failed to write *_bckg.tif file!', True)
         
-        
-        if not os.path.exists(self.directory+'projs_ranges/'):
+        if os.path.exists(self.directory+'projs_ranges/'):
+            del_old  = subprocess.call('rm '+self.directory+'projs_ranges/'+self.name+'*', shell=True)
+            if del_old == 0: self.add_to_log(f"Deleted old files.", True)  
+        else:
             os.makedirs(self.directory+'projs_ranges/')
             self.add_to_log('Created directory: '+self.directory+'projs_ranges/', True)
-
+            
         path = self.directory+'projs_ranges/'+self.name
-        path.replace(path.split('/')[-1], '')
-        del_old  = subprocess.call('rm '+path+'*', shell=True)
-        if del_old == 0: self.add_to_log(f"Deleted old files.", True)        
-        
         try:
             self.add_to_log('Writing file: '+path+"_proj_immax.tif", True)
             tifffile.imsave(path+"_proj_immax.tif", self.projs['immax'])

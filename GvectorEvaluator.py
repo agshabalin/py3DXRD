@@ -44,9 +44,10 @@ class GvectorEvaluator:
         self.eta_gap = None
         self.omega_gap = None
         
-        self.ds_tol = None
-        self.eta_tol = None
-        self.omega_tol = None
+        self.ds_tol = 0.005
+        self.group_tth_tol = None
+        self.group_eta_tol = None
+        self.group_omega_tol = None
         
         self.ds_bins = np.zeros((1))
         self.omega_bins = np.zeros((1))
@@ -107,8 +108,9 @@ class GvectorEvaluator:
         print('omega_gap:', self.omega_gap)
         
         print('ds_tol:', self.ds_tol)
-        print('eta_tol:', self.eta_tol)
-        print('omega_tol:', self.omega_tol)
+        print('group_tth_tol:'  , self.group_tth_tol)
+        print('group_eta_tol:'  , self.group_eta_tol)
+        print('group_omega_tol:', self.group_omega_tol)
         print('ds_bins:', self.ds_bins.shape, 'array')
         print('eta_bins:', self.eta_bins.shape, 'array')
         print('omega_bins:', self.omega_bins.shape, 'array')
@@ -137,7 +139,8 @@ class GvectorEvaluator:
                     elif 'gx  gy  gz' in line or 'xr yr zr' in line:
                         gvector_keys = line[2:-1].split()
                         ind = gvector_keys.index("spot3d_id")
-                    else: header.append(line[:-1])
+                    else:
+                        header.append(line[:-1])
                 else:
                     words = line.split()
                     if len(words) == 7 and words[-1] in ['P','I','F', 'A', 'B', 'C','R']:
@@ -162,6 +165,9 @@ class GvectorEvaluator:
         self.set_attr('header', header)
         self.set_attr('dshkls', dshkls)
         self.set_attr('gvectors', gvectors)
+        if 'tth' not in gvector_keys:
+            for g in self.gvectors:
+                g.update({'tth': self.geometries[0].tth_from_ds(g['ds']) })
         print(f'{len(gvectors)} gvectors loaded.')
         self.add_to_log('File closed!', False)
         return
@@ -269,32 +275,31 @@ class GvectorEvaluator:
             if not fit: continue
             else: in_ranges.append(i)
             
-        self.add_to_log(f'Removing {len(self.gvectors)-len(in_ranges)} gvectors that are out of ranges', True)
+        self.add_to_log(f'Removing {len(self.gvectors)-len(in_ranges)} gvectors that are out of ranges. After removal {len(in_ranges)} gvectors left.', True)
         self.set_attr('gvectors', [self.gvectors[i] for i in in_ranges])
-        self.save_gve(overwrite = True)
         return
     
-    def group_gvectors(self, ds_tol, eta_tol, omega_tol):
+    def group_gvectors(self, group_tth_tol, group_eta_tol, group_omega_tol):
         # Groups g-vectors that are close to each other, returns a list of such 'averaged' g-vectors.
         print(double_separator+f'Grouping {len(self.gvectors)} g-vectors')
-        print('Tolerances [ds, eta, omega]: ', [ds_tol, eta_tol, omega_tol])
-        if not    ds_tol >= 0: raise ValueError('ds_tol must be non-negative!')
-        if not   eta_tol >= 0: raise ValueError('eta_tol must be non-negative!')
-        if not omega_tol >= 0: raise ValueError('omega_tol must be non-negative!')
+        print('Tolerances [tth, eta, omega]: ', [group_tth_tol, group_eta_tol, group_omega_tol])
+        if not group_tth_tol   >= 0: raise ValueError('group_tth_tol must be non-negative!')
+        if not group_eta_tol   >= 0: raise ValueError('group_eta_tol must be non-negative!')
+        if not group_omega_tol >= 0: raise ValueError('group_omega_tol must be non-negative!')
         self.add_to_log('Grouping g-vectors...')
-        self.set_attr('ds_tol', ds_tol)
-        self.set_attr('eta_tol', eta_tol)
-        self.set_attr('omega_tol', omega_tol)
+        self.set_attr('group_tth_tol', group_tth_tol)
+        self.set_attr('group_eta_tol', group_eta_tol)
+        self.set_attr('group_omega_tol', group_omega_tol)
     
-        ds_list = [g['ds'] for g in self.gvectors]
-        chains_0 = group_to_chains(ds_list, ds_tol)
+        tth_list = [g['tth'] for g in self.gvectors]
+        chains_0 = group_to_chains(tth_list, group_tth_tol)
         
         chains_1 = []
         for C in chains_0:
             eta_list = [self.gvectors[i]['eta'] for i in C]
-            subchains = group_to_chains(eta_list, eta_tol)
+            subchains = group_to_chains(eta_list, group_eta_tol)
             tail_to_head = mod_360(eta_list[subchains[-1][-1]] - eta_list[subchains[0][0]], 0)
-            if len(subchains)>1 and abs(tail_to_head)<eta_tol:
+            if len(subchains)>1 and abs(tail_to_head)<group_eta_tol:
                 subchains[0] = subchains[-1] + subchains[0]
                 del subchains[-1]
             for c in subchains: chains_1 += [[C[i] for i in c]]
@@ -302,9 +307,9 @@ class GvectorEvaluator:
         chains_2 = []
         for C in chains_1:
             omega_list = [self.gvectors[i]['omega'] for i in C]
-            subchains = group_to_chains(omega_list, omega_tol)
+            subchains = group_to_chains(omega_list, group_omega_tol)
             tail_to_head = mod_360(omega_list[subchains[-1][-1]] - omega_list[subchains[0][0]], 0)
-            if len(subchains)>1 and abs(tail_to_head)<omega_tol:
+            if len(subchains)>1 and abs(tail_to_head)<group_omega_tol:
                 subchains[0] = subchains[-1] + subchains[0]
                 del subchains[-1]
             for c in subchains: chains_2 += [[C[i] for i in c]]
@@ -312,17 +317,17 @@ class GvectorEvaluator:
         chains_3 = []
         for C in chains_2:
             eta_list = [self.gvectors[i]['eta'] for i in C]
-            subchains = group_to_chains(eta_list, eta_tol)               
+            subchains = group_to_chains(eta_list, group_eta_tol)               
             tail_to_head = mod_360(eta_list[subchains[-1][-1]] - eta_list[subchains[0][0]], 0)
-            if len(subchains)>1 and abs(tail_to_head)<eta_tol:
+            if len(subchains)>1 and abs(tail_to_head)<group_eta_tol:
                 subchains[0] = subchains[-1] + subchains[0]
                 del subchains[-1]
             for c in subchains: chains_3 += [[C[i] for i in c]]
  
         chains_4 = []
         for C in chains_3:
-            ds_list = [self.gvectors[i]['ds'] for i in C]
-            subchains = group_to_chains(ds_list, ds_tol)
+            tth_list = [self.gvectors[i]['tth'] for i in C]
+            subchains = group_to_chains(tth_list, group_tth_tol)
             for c in subchains: chains_4 += [[C[i] for i in c]]
         
         av_gvectors = []
@@ -338,7 +343,9 @@ class GvectorEvaluator:
         return
 
 
-    def remove_not_inrings(self):
+    def remove_not_inrings(self, ds_tol = None):
+        if ds_tol and ds_tol != 'auto':
+            self.set_attr('ds_tol', ds_tol)
         I = indexing.indexer()
         name = self.name
         self.save_gve(gve_file = 'temp.gve', overwrite = True)
@@ -346,10 +353,12 @@ class GvectorEvaluator:
         self.set_attr('name', name)
         subprocess.call('rm '+self.directory+'temp.gve', shell=True)
         
+        I.ds_tol = self.ds_tol
         I.assigntorings()
+        self.add_to_log(f'Ring assignment using ds_tol = {self.ds_tol}', True)
         for i, tth in enumerate(I.tth): self.gvectors[i].update({'tth':tth})
         in_rings = np.compress(np.greater(I.ra,-1),np.arange(I.gv.shape[0])) # list of indexed peaks
-        self.add_to_log(f'Removing {len(self.gvectors)-len(in_rings)} gvectors that are not in rings', True)
+        self.add_to_log(f'Removing {len(self.gvectors)-len(in_rings)} gvectors that are not in rings.', True)
         self.set_attr('gvectors', [self.gvectors[i] for i in in_rings])
         self.save_gve(overwrite = True)
         return
@@ -366,7 +375,9 @@ class GvectorEvaluator:
         self.set_attr('name', name)
         subprocess.call('rm '+self.directory+'temp.gve', shell=True)
         
+        I.ds_tol = self.ds_tol
         I.assigntorings()
+        self.add_to_log(f'Ring assignment using ds_tol = {self.ds_tol}', True)
         for i, tth in enumerate(I.tth): self.gvectors[i].update({'tth':tth})
         hkl_list = [I.unitcell.ringhkls[ds][-1] for ds in I.unitcell.ringds] # [-1] hkl with highest h (usualy last in the set)
         in_rings = np.compress(np.greater(I.ra,-1),np.arange(I.gv.shape[0])) # list of indexed peaks
@@ -416,11 +427,11 @@ class GvectorEvaluator:
             plt.ylabel('omega (deg)')
 
             sub3 = fig.add_subplot(133)
-            x1 = [g['ds' ] for g in self.gvectors]
+            x1 = [g['tth'] for g in self.gvectors]
             y1 = [g['eta'] for g in self.gvectors]
             plt.scatter(x1, y1, s = 1)
             plt.title(f'Scatter plot of all {len(self.gvectors)} gvectors')
-            plt.xlabel('ds')
+            plt.xlabel('tth (deg)')
             plt.ylabel('eta (deg)')
             plt.show()
             fig.savefig(self.directory+self.name+'_scatter.png')
@@ -430,16 +441,20 @@ class GvectorEvaluator:
         for i,ds in enumerate(self.ds_bins): print(f'ds, n_peaks:  {ds:.3f}, {n_peaks[i]:d}')
         
         if plot:
-            ds_list = [g['ds' ] for g in self.gvectors]
-            y1 = [g['eta'  ] for g in self.gvectors]
             x1 = []
-            for x in ds_list:
-                nearest_ds = -1000000
+            x2 = []
+            for g in self.gvectors:
+                nearest_ds  = -1000000
+                nearest_tth = -1000000
                 for iR,ds in enumerate(I.unitcell.ringds):
-                    if abs(ds-x) < abs(nearest_ds-x):
+                    tth = 2*np.degrees(np.arcsin(ds*I.wavelength/2))
+                    if abs(ds-g['ds']) < abs(nearest_ds-g['ds']):
                         r = iR
-                        nearest_ds = ds
-                x1.append(x-nearest_ds+r*0.01)
+                        nearest_ds  = ds
+                        nearest_tth = tth
+                x1.append(g['ds' ]-nearest_ds  + r*0.01)
+                x2.append(g['tth']-nearest_tth + r*0.5)
+
             fig = plt.figure(figsize=(16, 10))
             
             y1 = [g['eta'  ] for g in self.gvectors]
@@ -452,11 +467,11 @@ class GvectorEvaluator:
             
             y2 = [g['omega'  ] for g in self.gvectors]
             sub1 = fig.add_subplot(122)
-            plt.scatter(x1, y2, s = 1)
+            plt.scatter(x2, y2, s = 1)
             plt.title(f'Scatter plot of all {len(self.gvectors)} gvectors')
-            plt.xlabel('ds-ds_hkl')
+            plt.xlabel('tth-tth_hkl')
             plt.ylabel('omega (deg)')
-            plt.xlim([-0.01, r*0.01+0.01])
+            plt.xlim([-0.5, r*0.5+0.01])
             plt.show()
             fig.savefig(self.directory+self.name+'_scatter_delta_ds.png')
             self.add_to_log('Saved eta_delta_ds: '+self.name+'_scatter_eta_delta_ds.png', True)
@@ -502,25 +517,25 @@ class GvectorEvaluator:
 #         self.set_attr('geometry' , PI.geometry)
 #         return
 ### OLD version of group_vectors, works slower and also 
-#         def group_gvectors(self, ds_tol, eta_tol, omega_tol):
+#         def group_gvectors(self, ds_tol, group_eta_tol, group_omega_tol):
 #         print(double_separator+f'Grouping {len(self.gvectors)} g-vectors')
-#         print('Tolerances [ds, eta, omega]: ', [ds_tol, eta_tol, omega_tol])
+#         print('Tolerances [ds, eta, omega]: ', [ds_tol, group_eta_tol, group_omega_tol])
 #         if not    ds_tol >= 0: raise ValueError('ds_tol must be non-negative!')
-#         if not   eta_tol >= 0: raise ValueError('eta_tol must be non-negative!')
-#         if not omega_tol >= 0: raise ValueError('omega_tol must be non-negative!')
+#         if not   group_eta_tol >= 0: raise ValueError('group_eta_tol must be non-negative!')
+#         if not group_omega_tol >= 0: raise ValueError('group_omega_tol must be non-negative!')
 #         self.add_to_log('Grouping g-vectors...')
 #         self.set_attr('ds_tol', ds_tol)
-#         self.set_attr('eta_tol', eta_tol)
-#         self.set_attr('omega_tol', omega_tol)
+#         self.set_attr('group_eta_tol', group_eta_tol)
+#         self.set_attr('group_omega_tol', group_omega_tol)
 #         g_sum, n_sum = [], []
 #         for iP, gP in enumerate(self.gvectors):
 #             to_add = True
 #             for iB, gB in enumerate(g_sum):
 #                 if abs(gP['ds']-g_sum[iB]['ds']/n_sum[iB]) < ds_tol:
 #                     d_eta = mod_360( (g_sum[iB]['eta']/n_sum[iB])-gP['eta'], 0 )
-#                     if abs(d_eta) < eta_tol:
+#                     if abs(d_eta) < group_eta_tol:
 #                         d_omega = mod_360( (g_sum[iB]['omega']/n_sum[iB])-gP['omega'], 0 )
-#                         if abs(d_omega) < omega_tol:
+#                         if abs(d_omega) < group_omega_tol:
 #                             for k in gP.keys(): g_sum[iB][k] += gP[k]
 #                             n_sum[iB]+=1
 #                             to_add = False

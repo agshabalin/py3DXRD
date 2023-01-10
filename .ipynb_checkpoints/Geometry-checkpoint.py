@@ -665,6 +665,14 @@ class Geometry:
             yaml.dump(pars, f)
 
         return directory+yml_file
+    
+    
+    def ds_from_tth(self, tth):
+        return 2*np.sin(np.radians(tth/2))/self.wavelength
+    
+    
+    def tth_from_ds(self, ds):
+        return 2*np.degrees(np.arcsin(ds*self.wavelength/2))
 
 #### TESTS    ###############
 # G = Geometry(directory='/asap3/petra3/gpfs/p21.2/2021/data/11008399/processed/CS_1/load1/z_00/')

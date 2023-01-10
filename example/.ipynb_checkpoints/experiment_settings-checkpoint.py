@@ -122,6 +122,7 @@ def set_p212_sweep(path_gen, i_slow, i_fast, det_num, default_xyz = [0,0,0], met
     
     return SP
 
+
 ### SETTING THE GRAINSPOTTER PARAMETERS;
 def set_grainspotter(path_gen, material=None, domega = None):
     GS = py3DXRD.GrainSpotter(directory = path_gen + 'processed/')

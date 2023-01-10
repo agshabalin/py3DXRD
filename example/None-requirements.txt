@@ -1,9 +1,0 @@
-experiment_settings
-matplotlib==3.5.3
-numpy==1.22.4
-py3DXRD
-sinfo==0.3.4
-IPython==8.4.0
-jupyter_client==7.3.5
-jupyter_core==4.11.1
-notebook==6.4.12
